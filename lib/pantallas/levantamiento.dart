@@ -263,7 +263,7 @@ return Card(
           ],
         ),
         
-        // Aquí se inserta la tarjeta de información si se escaneó algo
+        // Aquí va inserta la tarjeta de información si se escaneó algo
         if (_mostrarResultado) _construirTarjetaResultadoQR(),
         
       ],

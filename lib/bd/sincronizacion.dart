@@ -7,7 +7,7 @@ class Sincronizacion {
   // Si pruebas en el emulador de Android usa: 'http://10.0.2.2:8000/api/bienes'
   // Si pruebas en un celular físico usa la IP de tu PC por Wi-Fi, ej: 'http://192.168.1.70:8000/api/bienes'
   // Si pruebas como aplicación de Windows usa: 'http://127.0.0.1:8000/api/bienes'
-  static const String urlApi = 'http://10.0.2.2:8000/api/bienes';
+  static const String urlApi = 'http://172.17.3.18:8000/api/bienes';
 
   static Future<void> descargarBienes() async {
     print("Iniciando descarga de bienes...");
