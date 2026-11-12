@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Local toolchains and temporary backend implementation staging.
+/.tools/
+/.phase2/
