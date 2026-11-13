@@ -1,3 +1,5 @@
+/*  este archivo define objetos que representan los datos del inventario, los usa el sistema */
+
 import 'dart:convert';
 import 'dart:math';
 
@@ -77,6 +79,7 @@ class MobileSession {
   final Set<String> permissions;
   final Set<String> commands;
   final DateTime? offlineUntil;
+  final bool canManagePeriods;
 
   MobileSession(
       {required this.userId,
@@ -84,7 +87,8 @@ class MobileSession {
       required this.userName,
       required this.permissions,
       required this.commands,
-      this.offlineUntil}) {
+      this.offlineUntil,
+      this.canManagePeriods = false}) {
     textId(userId);
     uuidText(deviceId);
   }
@@ -95,6 +99,7 @@ class MobileSession {
         deviceId: uuidText(jsonObject(json['device'])['id']),
         permissions: (json['permissions'] as List).cast<String>().toSet(),
         commands: (json['supported_commands'] as List).cast<String>().toSet(),
+        canManagePeriods: json['can_manage_periods'] == true,
         offlineUntil: json['offline_authorized_until'] == null
             ? null
             : DateTime.parse(json['offline_authorized_until'] as String)
@@ -179,6 +184,21 @@ class PackageManifest {
     textId(json['periodo_id']);
     textId(json['numero_departamento_inicial'], signed: true);
     nullableId(json['ubicacion_id_inicial']);
+    if (json['heredado'] != null && json['heredado'] is! bool) {
+      throw const DataContractException('Estado de periodo heredado inválido.');
+    }
+    if (json['heredado'] is bool &&
+        json.containsKey('snapshot_completado_at') &&
+        json['heredado'] != (json['snapshot_completado_at'] == null)) {
+      throw const DataContractException(
+          'La instantánea no corresponde al tipo de periodo.');
+    }
+    if (json['membership_sha256'] != null &&
+        (json['membership_sha256'] is! String ||
+            !RegExp(r'^[0-9a-f]{64}$')
+                .hasMatch(json['membership_sha256'] as String))) {
+      throw const DataContractException('Hash de membresía inválido.');
+    }
     DateTime.parse(json['offline_authorized_until'] as String);
     DateTime.parse(json['download_expires_at'] as String);
     counts = Map<String, int>.from(jsonObject(json['counts']));
@@ -215,6 +235,10 @@ class PackageManifest {
   String get periodId => _json['periodo_id'] as String;
   String get departmentNumber => _json['numero_departamento_inicial'] as String;
   String? get locationId => _json['ubicacion_id_inicial'] as String?;
+  bool get isLegacy =>
+      _json['heredado'] == true ||
+      (_json.containsKey('snapshot_completado_at') &&
+          _json['snapshot_completado_at'] == null);
   int get totalBytes => _json['total_bytes'] as int;
   DateTime get offlineUntil =>
       DateTime.parse(_json['offline_authorized_until'] as String).toUtc();
@@ -227,7 +251,7 @@ class InventoryItem {
   final JsonMap _json;
   InventoryItem.fromJson(JsonMap json) : _json = copyJson(json) {
     textId(json['detalle_id']);
-    textId(json['snapshot_id']);
+    nullableId(json['snapshot_id']);
     AssetIdentity.fromJson(jsonObject(json['bien']));
     nullableId(json['numero_departamento_inicial'], signed: true);
     nullableId(json['ubicacion_id_inicial']);
@@ -261,7 +285,7 @@ class InventoryItem {
   }
 
   String get detailId => _json['detalle_id'] as String;
-  String get snapshotId => _json['snapshot_id'] as String;
+  String? get snapshotId => _json['snapshot_id'] as String?;
   AssetIdentity get identity =>
       AssetIdentity.fromJson(jsonObject(_json['bien']));
   bool get reviewed => _json['revisado'] as bool;
@@ -333,6 +357,7 @@ class SyncReport {
 }
 
 class InventoryPeriod {
+  final JsonMap _json;
   final String id;
   final String name;
   final int year;
@@ -340,17 +365,42 @@ class InventoryPeriod {
   final String state;
   final bool mobileEligible;
   InventoryPeriod.fromJson(JsonMap json)
-    : id = textId(json['id']), name = json['nombre'] as String,
-      year = json['anio'] as int, month = json['mes'] as int,
-      state = json['estado'] as String, mobileEligible = json['mobile_eligible'] == true;
+      : _json = copyJson(json),
+        id = textId(json['id']),
+        name = json['nombre'] as String,
+        year = json['anio'] as int,
+        month = json['mes'] as int,
+        state = json['estado'] as String,
+        mobileEligible = json['mobile_eligible'] == true;
+  JsonMap toJson() => copyJson(_json);
+}
+
+class PeriodLookup {
+  final bool exists;
+  final InventoryPeriod? period;
+  final bool canCreate;
+  final bool canClose;
+  PeriodLookup.fromJson(JsonMap json)
+      : exists = json['exists'] as bool,
+        period = json['period'] == null
+            ? null
+            : InventoryPeriod.fromJson(jsonObject(json['period'])),
+        canCreate = json['can_create'] as bool,
+        canClose = json['can_close'] as bool {
+    if (exists != (period != null) ||
+        (exists && canCreate) ||
+        (canClose && (period == null || period!.state != 'abierto'))) {
+      throw const DataContractException('Respuesta de periodo inconsistente.');
+    }
+  }
 }
 
 class Department {
   final String number;
   final String? description;
   Department.fromJson(JsonMap json)
-    : number = textId(json['numero_departamento'], signed: true),
-      description = json['descripcion'] as String?;
+      : number = textId(json['numero_departamento'], signed: true),
+        description = json['descripcion'] as String?;
 }
 
 class Location {
@@ -358,19 +408,21 @@ class Location {
   final String? departmentNumber;
   final String? description;
   Location.fromJson(JsonMap json)
-    : id = textId(json['id']),
-      departmentNumber = nullableId(json['numero_departamento'], signed: true),
-      description = json['descripcion'] as String?;
+      : id = textId(json['id']),
+        departmentNumber =
+            nullableId(json['numero_departamento'], signed: true),
+        description = json['descripcion'] as String?;
 }
 
 class Employee {
   final String id;
-  final String departmentNumber;
+  final String? departmentNumber;
   final String? name;
   Employee.fromJson(JsonMap json)
-    : id = textId(json['clave_empleado'], signed: true),
-      departmentNumber = textId(json['numero_departamento'], signed: true),
-      name = json['nombre_completo'] as String?;
+      : id = textId(json['clave_empleado'], signed: true),
+        departmentNumber =
+            nullableId(json['numero_departamento'], signed: true),
+        name = json['nombre_completo'] as String?;
 }
 
 class QueuedOperation {
@@ -385,11 +437,18 @@ class QueuedOperation {
   final JsonMap? receipt;
   final DateTime? resolvedAt;
   QueuedOperation.fromRow(Map<String, Object?> row)
-    : uuid = uuidText(row['operation_uuid']), packageId = uuidText(row['package_id']),
-      detailId = textId(row['detalle_id']), type = row['type'] as String,
-      status = row['status'] as String, attempts = row['attempts'] as int,
-      lastError = row['last_error'] as String?,
-      operation = jsonObject(jsonDecode(row['operation_json'] as String)),
-      receipt = row['receipt_json'] == null ? null : jsonObject(jsonDecode(row['receipt_json'] as String)),
-      resolvedAt = row['resolved_at'] == null ? null : DateTime.parse(row['resolved_at'] as String).toUtc();
+      : uuid = uuidText(row['operation_uuid']),
+        packageId = uuidText(row['package_id']),
+        detailId = textId(row['detalle_id']),
+        type = row['type'] as String,
+        status = row['status'] as String,
+        attempts = row['attempts'] as int,
+        lastError = row['last_error'] as String?,
+        operation = jsonObject(jsonDecode(row['operation_json'] as String)),
+        receipt = row['receipt_json'] == null
+            ? null
+            : jsonObject(jsonDecode(row['receipt_json'] as String)),
+        resolvedAt = row['resolved_at'] == null
+            ? null
+            : DateTime.parse(row['resolved_at'] as String).toUtc();
 }

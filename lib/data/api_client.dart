@@ -1,3 +1,5 @@
+/* es quien se comunica con larabel */
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -52,16 +54,19 @@ class MobileApiClient {
   Future<http.Response> _request(String method, String path,
       {Map<String, String>? query,
       JsonMap? body,
-      int maxBytes = 1048576}) async {
-    final token = await tokenProvider();
-    if (token == null || token.isEmpty) {
+      int maxBytes = 1048576,
+      bool authenticated = true}) async {
+    final token = authenticated ? await tokenProvider() : null;
+    if (authenticated && (token == null || token.isEmpty)) {
       throw const MobileApiException(401, 'AUTH_REQUIRED');
     }
     final uri = baseUri.resolve(path).replace(queryParameters: query);
     final request = http.Request(method, uri)
       ..followRedirects = false
-      ..headers.addAll(
-          {'Accept': 'application/json', 'Authorization': 'Bearer ' + token});
+      ..headers.addAll({
+        'Accept': 'application/json',
+        if (token != null) 'Authorization': 'Bearer ' + token
+      });
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.bodyBytes = utf8.encode(jsonEncode(body));
@@ -104,17 +109,47 @@ class MobileApiClient {
   }
 
   Future<JsonMap> _json(String method, String path,
-      {Map<String, String>? query, JsonMap? body}) async {
-    final response = await _request(method, path, query: query, body: body);
+      {Map<String, String>? query,
+      JsonMap? body,
+      bool authenticated = true}) async {
+    final response = await _request(method, path,
+        query: query, body: body, authenticated: authenticated);
     try {
       return jsonObject(jsonDecode(utf8.decode(response.bodyBytes)));
     } on FormatException {
-      throw const DataContractException('La API no devolvió un objeto JSON válido.');
+      throw const DataContractException(
+          'La API no devolvió un objeto JSON válido.');
     }
   }
 
   Future<MobileSession> getSession() async =>
       MobileSession.fromJson(await _json('GET', 'session'));
+
+  Future<JsonMap> login(
+          {required String email,
+          required String password,
+          required String deviceId,
+          required String deviceName,
+          String appVersion = '1.0.0'}) =>
+      _json('POST', 'auth/login', authenticated: false, body: {
+        'email': email,
+        'password': password,
+        'device': {
+          'id': uuidText(deviceId),
+          'name': deviceName,
+          'platform': 'android',
+          'app_version': appVersion
+        }
+      });
+
+  Future<JsonMap> completeTwoFactor(
+          {required String challengeToken,
+          required String code,
+          bool recoveryCode = false}) =>
+      _json('POST', 'auth/two-factor', authenticated: false, body: {
+        'challenge_token': challengeToken,
+        recoveryCode ? 'recovery_code' : 'code': code
+      });
 
   /// Bind a multi-request operation to one credential. Replacing the signed-in
   /// account while a batch is in flight must not upload another user's queue.
@@ -123,8 +158,12 @@ class MobileApiClient {
     if (token == null || token.isEmpty) {
       throw const MobileApiException(401, 'AUTH_REQUIRED');
     }
-    return MobileApiClient(baseUri: baseUri, tokenProvider: () async => token,
-      client: _client, timeout: timeout, allowLocalHttp: baseUri.scheme == 'http');
+    return MobileApiClient(
+        baseUri: baseUri,
+        tokenProvider: () async => token,
+        client: _client,
+        timeout: timeout,
+        allowLocalHttp: baseUri.scheme == 'http');
   }
 
   Future<List<JsonMap>> _listing(
@@ -148,6 +187,23 @@ class MobileApiClient {
   }
 
   Future<List<JsonMap>> periods() => _listing('periods', {'estado': 'abierto'});
+
+  Future<PeriodLookup> lookupPeriod(
+          {required int year, required int month}) async =>
+      PeriodLookup.fromJson(await _json('GET', 'periods/lookup',
+          query: {'anio': year.toString(), 'mes': month.toString()}));
+
+  Future<InventoryPeriod> createPeriod(
+      {required int year, required int month, required String name}) async {
+    final result = await _json('POST', 'periods',
+        body: {'anio': year, 'mes': month, 'nombre': name});
+    return InventoryPeriod.fromJson(jsonObject(result['period']));
+  }
+
+  Future<InventoryPeriod> closePeriod(String periodId) async {
+    final result = await _json('POST', 'periods/${textId(periodId)}/close');
+    return InventoryPeriod.fromJson(jsonObject(result['period']));
+  }
 
   Future<List<JsonMap>> departments(String periodId) =>
       _listing('departments', {'periodo_id': textId(periodId)});

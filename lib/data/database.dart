@@ -1,7 +1,8 @@
+/* este archivo crea las tablas y columnas sonde se guardan datos permanentes */
+
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
-/// Persistent local inventory and its durable queue of mobile operations.
 class InventoryDatabase {
   InventoryDatabase({DatabaseFactory? factory, String? path})
       : _factory = factory,
@@ -23,11 +24,28 @@ class InventoryDatabase {
       return await factory.openDatabase(
         path,
         options: OpenDatabaseOptions(
-          version: 2,
-          onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
+          version: 3,
+          onConfigure: (db) async {
+            // SQLite cannot change foreign_keys inside the upgrade transaction.
+            // Only v2 needs table rebuilding; checks run before its commit.
+            final previous = await db.getVersion();
+            await db.execute(
+                'PRAGMA foreign_keys = ${previous == 2 ? 'OFF' : 'ON'}');
+          },
           onCreate: (db, version) => _createSchema(db),
           onUpgrade: (db, oldVersion, newVersion) async {
-            if (oldVersion < 2) await _createSchema(db);
+            if (oldVersion < 2) {
+              await _createSchema(db);
+            } else if (oldVersion < 3) {
+              await _upgradeV3(db);
+            }
+          },
+          onOpen: (db) async {
+            await db.execute('PRAGMA foreign_keys = ON');
+            if ((await db.rawQuery('PRAGMA foreign_key_check')).isNotEmpty) {
+              throw StateError(
+                  'La base local contiene referencias inconsistentes.');
+            }
           },
         ),
       );
@@ -78,11 +96,36 @@ class InventoryDatabase {
                    COALESCE(ubicacion_id, ''))
       WHERE active = 1 AND status = 'ready'
     ''');
+    await db.execute(_itemsSql('items'));
+    await _itemsIndex(db);
     await db.execute('''
-      CREATE TABLE items (
+      CREATE TABLE departments (
+        package_id TEXT NOT NULL,
+        numero_departamento TEXT NOT NULL,
+        descripcion TEXT,
+        PRIMARY KEY (package_id, numero_departamento),
+        FOREIGN KEY (package_id) REFERENCES packages (package_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE locations (
+        package_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        numero_departamento TEXT,
+        descripcion TEXT,
+        PRIMARY KEY (package_id, id),
+        FOREIGN KEY (package_id) REFERENCES packages (package_id)
+      )
+    ''');
+    await db.execute(_employeesSql('employees'));
+    await _createQueue(db);
+  }
+
+  static String _itemsSql(String table) => '''
+      CREATE TABLE $table (
         package_id TEXT NOT NULL,
         detalle_id TEXT NOT NULL,
-        snapshot_id TEXT NOT NULL,
+        snapshot_id TEXT,
         clave_activo_fijo TEXT COLLATE BINARY NOT NULL,
         numero_inventario_consecutivo TEXT COLLATE BINARY NOT NULL,
         numero_departamento_inicial TEXT,
@@ -104,40 +147,43 @@ class InventoryDatabase {
         UNIQUE (package_id, clave_activo_fijo),
         FOREIGN KEY (package_id) REFERENCES packages (package_id)
       )
-    ''');
-    await db.execute('''
+    ''';
+
+  static Future<void> _itemsIndex(Database db) => db.execute('''
       CREATE INDEX items_inventory_literal
       ON items (package_id, numero_inventario_consecutivo COLLATE BINARY)
     ''');
-    await db.execute('''
-      CREATE TABLE departments (
-        package_id TEXT NOT NULL,
-        numero_departamento TEXT NOT NULL,
-        descripcion TEXT,
-        PRIMARY KEY (package_id, numero_departamento),
-        FOREIGN KEY (package_id) REFERENCES packages (package_id)
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE locations (
-        package_id TEXT NOT NULL,
-        id TEXT NOT NULL,
-        numero_departamento TEXT,
-        descripcion TEXT,
-        PRIMARY KEY (package_id, id),
-        FOREIGN KEY (package_id) REFERENCES packages (package_id)
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE employees (
+
+  static String _employeesSql(String table) => '''
+      CREATE TABLE $table (
         package_id TEXT NOT NULL,
         clave_empleado TEXT NOT NULL,
-        numero_departamento TEXT NOT NULL,
+        numero_departamento TEXT,
         nombre_completo TEXT,
         PRIMARY KEY (package_id, clave_empleado),
         FOREIGN KEY (package_id) REFERENCES packages (package_id)
       )
-    ''');
+    ''';
+
+  static Future<void> _upgradeV3(Database db) async {
+    // Keep queue, UUIDs, payload bytes and their trigger in place. Rebuild only
+    // the two tables whose nullable columns changed, within one transaction.
+    await db.execute(_itemsSql('items_v3'));
+    await db.execute('INSERT INTO items_v3 SELECT * FROM items');
+    await db.execute('DROP TABLE items');
+    await db.execute('ALTER TABLE items_v3 RENAME TO items');
+    await _itemsIndex(db);
+    await db.execute(_employeesSql('employees_v3'));
+    await db.execute('INSERT INTO employees_v3 SELECT * FROM employees');
+    await db.execute('DROP TABLE employees');
+    await db.execute('ALTER TABLE employees_v3 RENAME TO employees');
+    if ((await db.rawQuery('PRAGMA foreign_key_check')).isNotEmpty) {
+      throw StateError(
+          'No se pudo migrar la base local conservando sus referencias.');
+    }
+  }
+
+  static Future<void> _createQueue(Database db) async {
     await db.execute('''
       CREATE TABLE sync_queue (
         operation_uuid TEXT PRIMARY KEY,

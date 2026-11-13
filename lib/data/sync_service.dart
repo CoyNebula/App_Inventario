@@ -1,3 +1,5 @@
+
+/* envia la cola pendiente a laravel por lotes y confirma la operacion */
 import 'dart:convert';
 
 import 'api_client.dart';

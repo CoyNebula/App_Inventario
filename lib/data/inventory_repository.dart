@@ -1,3 +1,9 @@
+/* descarga ubicaciones
+busca el bien localmente
+guarda una revision
+registra una reasignacion
+calcula avance */
+
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -33,7 +39,8 @@ class InventoryRepository {
       required String departmentNumber,
       required String locationId,
       bool includeReassignmentCatalogs = true,
-      String? packageId}) async {
+      String? packageId,
+      void Function(int received, int total)? onDownloadProgress}) async {
     final downloadApi = await api.credentialSnapshot();
     final online = await downloadApi.getSession();
     _checkOwner(online.userId, online.deviceId);
@@ -60,18 +67,25 @@ class InventoryRepository {
       throw const DataContractException(
           'El paquete no corresponde al sitio solicitado.');
     }
-    return installPackage(manifest, period: selected.single, pageSource: downloadApi);
+    return installPackage(manifest,
+        period: selected.single,
+        pageSource: downloadApi,
+        onDownloadProgress: onDownloadProgress);
   }
 
   /// A failed download stays inactive. The same immutable package can be resumed
   /// by retrieving its manifest and reinstalling all pages (no partial publication).
-  Future<String> resumeDownload(String packageId, {required JsonMap period}) async {
+  Future<String> resumeDownload(String packageId,
+      {required JsonMap period}) async {
     final downloadApi = await api.credentialSnapshot();
-    return installPackage(await downloadApi.manifest(packageId), period: period, pageSource: downloadApi);
+    return installPackage(await downloadApi.manifest(packageId),
+        period: period, pageSource: downloadApi);
   }
 
   Future<String> installPackage(PackageManifest manifest,
-      {required JsonMap period, MobileApiClient? pageSource}) async {
+      {required JsonMap period,
+      MobileApiClient? pageSource,
+      void Function(int received, int total)? onDownloadProgress}) async {
     _checkOwner(manifest.userId, manifest.deviceId);
     if (period['id'] != manifest.periodId ||
         period['estado'] != 'abierto' ||
@@ -130,6 +144,7 @@ class InventoryRepository {
       }
     });
     try {
+      onDownloadProgress?.call(0, manifest.pages.length);
       for (final descriptor in manifest.pages) {
         final bytes =
             await downloadApi.packagePage(manifest.packageId, descriptor.page);
@@ -155,6 +170,10 @@ class InventoryRepository {
           final batch = tx.batch();
           for (final raw in page['items'] as List) {
             final item = InventoryItem.fromJson(jsonObject(raw));
+            if (item.snapshotId == null && !manifest.isLegacy) {
+              throw const DataContractException(
+                  'Bien sin instantánea en un periodo oficial.');
+            }
             final json = item.toJson();
             if (json['numero_departamento_inicial'] !=
                     manifest.departmentNumber ||
@@ -190,12 +209,13 @@ class InventoryRepository {
               'package_id': manifest.packageId,
               'clave_empleado': textId(row['clave_empleado'], signed: true),
               'numero_departamento':
-                  textId(row['numero_departamento'], signed: true),
+                  nullableId(row['numero_departamento'], signed: true),
               'nombre_completo': row['nombre_completo'] as String?
             });
           }
           await batch.commit(noResult: true);
         });
+        onDownloadProgress?.call(descriptor.page, manifest.pages.length);
       }
       await db.transaction((tx) async {
         const tables = {
@@ -260,34 +280,47 @@ class InventoryRepository {
     }
   }
 
-  Future<void> _validateReferences(DatabaseExecutor db, String packageId) async {
-    final departmentRows = await db.query('departments', where: 'package_id=?', whereArgs: [packageId]);
-    final departments = departmentRows.map((d) => d['numero_departamento']).toSet();
-    final locationRows = await db.query('locations', where: 'package_id=?', whereArgs: [packageId]);
-    final locations = {for (final location in locationRows) location['id'] as String: location};
+  Future<void> _validateReferences(
+      DatabaseExecutor db, String packageId) async {
+    final departmentRows = await db
+        .query('departments', where: 'package_id=?', whereArgs: [packageId]);
+    final departments =
+        departmentRows.map((d) => d['numero_departamento']).toSet();
+    final locationRows = await db
+        .query('locations', where: 'package_id=?', whereArgs: [packageId]);
+    final locations = {
+      for (final location in locationRows) location['id'] as String: location
+    };
     for (final location in locationRows) {
       final department = location['numero_departamento'];
       if (department != null && !departments.contains(department)) {
-        throw const DataContractException('Ubicación sin departamento en el paquete.');
+        throw const DataContractException(
+            'Ubicación sin departamento en el paquete.');
       }
     }
-    for (final employee in await db.query('employees', where: 'package_id=?', whereArgs: [packageId])) {
-      if (!departments.contains(employee['numero_departamento'])) {
-        throw const DataContractException('Empleado sin departamento autorizado en el paquete.');
-      }
-    }
-    final items = await db.query('items', columns: ['current_json'], where: 'package_id=?', whereArgs: [packageId]);
+    // An employee's affiliation is not a destination permission. The Web can
+    // reassign an employee to another department or one without prior affiliation.
+    final items = await db.query('items',
+        columns: ['current_json'],
+        where: 'package_id=?',
+        whereArgs: [packageId]);
     for (final row in items) {
-      final item = InventoryItem.fromJson(jsonObject(jsonDecode(row['current_json'] as String)));
+      final item = InventoryItem.fromJson(
+          jsonObject(jsonDecode(row['current_json'] as String)));
       if (item.restricted) continue;
       final current = item.current;
-      if (current == null || !departments.contains(current['numero_departamento'])) {
-        throw const DataContractException('Bien visible sin departamento en el paquete.');
+      if (current == null ||
+          !departments.contains(current['numero_departamento'])) {
+        throw const DataContractException(
+            'Bien visible sin departamento en el paquete.');
       }
       final locationId = current['ubicacion_id'];
-      if (locationId != null && (!locations.containsKey(locationId) ||
-          locations[locationId]!['numero_departamento'] != current['numero_departamento'])) {
-        throw const DataContractException('La ubicación actual no corresponde al departamento del bien.');
+      if (locationId != null &&
+          (!locations.containsKey(locationId) ||
+              locations[locationId]!['numero_departamento'] !=
+                  current['numero_departamento'])) {
+        throw const DataContractException(
+            'La ubicación actual no corresponde al departamento del bien.');
       }
       // Initial references are historical: their current catalog entry may
       // legitimately be absent or belong to another department.
@@ -334,13 +367,41 @@ class InventoryRepository {
 
   Future<InventoryProgress> progress(String packageId) async {
     final db = await database.database;
-    await _ready(db, packageId);
+    final package = await _ready(db, packageId);
+    final manifest = PackageManifest.fromJson(
+        jsonObject(jsonDecode(package['manifest_json'] as String)));
+    var filter = 'package_id=?';
+    final args = <Object?>[packageId];
+    if (manifest.isLegacy) {
+      filter += ' AND numero_departamento_actual=?';
+      args.add(manifest.departmentNumber);
+      if (manifest.locationId != null) {
+        filter += ' AND ubicacion_id_actual=?';
+        args.add(manifest.locationId);
+      }
+    }
     final row = (await db.rawQuery(
-            'SELECT COUNT(*) AS total, COALESCE(SUM(revisado),0) AS reviewed FROM items WHERE package_id=?',
-            [packageId]))
+            'SELECT COUNT(*) AS total, COALESCE(SUM(revisado),0) AS reviewed FROM items WHERE $filter',
+            args))
         .single;
     return InventoryProgress(
         total: row['total'] as int, reviewed: row['reviewed'] as int);
+  }
+
+  Future<InventoryPeriod?> periodForPackage(String packageId) async {
+    final db = await database.database;
+    final package = await _ready(db, packageId);
+    final raw = package['period_json'];
+    return raw == null
+        ? null
+        : InventoryPeriod.fromJson(jsonObject(jsonDecode(raw as String)));
+  }
+
+  Future<void> updatePeriodState(InventoryPeriod period) async {
+    final db = await database.database;
+    await db.update('packages', {'period_json': jsonEncode(period.toJson())},
+        where: 'periodo_id=? AND user_id=? AND device_id=?',
+        whereArgs: [period.id, session.userId, session.deviceId]);
   }
 
   Future<InventoryItem?> item(String packageId, String detailId) async {
@@ -420,11 +481,17 @@ class InventoryRepository {
     final db = await database.database;
     return db.transaction((tx) async {
       final package = await _ready(tx, packageId, active: true);
+      final rawPeriod = package['period_json'];
+      if (rawPeriod != null &&
+          jsonObject(jsonDecode(rawPeriod as String))['estado'] != 'abierto') {
+        throw const DataContractException(
+            'El periodo está cerrado; no admite nuevas capturas.');
+      }
       final manifest = PackageManifest.fromJson(
           jsonObject(jsonDecode(package['manifest_json'] as String)));
-      if (session.offlineUntil == null ||
-          !manifest.offlineUntil.isAfter(clock().toUtc()) ||
-          !session.offlineUntil!.isAfter(clock().toUtc())) {
+      if (!manifest.offlineUntil.isAfter(clock().toUtc()) ||
+          (session.offlineUntil != null &&
+              !session.offlineUntil!.isAfter(clock().toUtc()))) {
         throw const DataContractException(
             'La autorización offline venció. Conecta para renovarla.');
       }

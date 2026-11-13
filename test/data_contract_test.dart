@@ -289,8 +289,10 @@ void main() {
           throwsA(isA<DataContractException>()));
     });
 
-    test('JSON roto en una respuesta 200 produce error de contrato tipado', () async {
-      final mock = MockClient((request) async => http.Response('<html>Error</html>', 200));
+    test('JSON roto en una respuesta 200 produce error de contrato tipado',
+        () async {
+      final mock = MockClient(
+          (request) async => http.Response('<html>Error</html>', 200));
       addTearDown(mock.close);
       await expectLater(mockApi(mock).departments('12'),
           throwsA(isA<DataContractException>()));
@@ -321,10 +323,12 @@ void main() {
     setUpAll(sqfliteFfiInit);
     setUp(() {
       package = fixturePackage();
-      database = InventoryDatabase(factory: databaseFactoryFfi, path: inMemoryDatabasePath);
+      database = InventoryDatabase(
+          factory: databaseFactoryFfi, path: inMemoryDatabasePath);
       client = MockClient((request) async {
         if (request.url.path.contains('/pages/')) {
-          return http.Response.bytes(package.pages[int.parse(request.url.pathSegments.last)]!, 200);
+          return http.Response.bytes(
+              package.pages[int.parse(request.url.pathSegments.last)]!, 200);
         }
         return http.Response('{}', 404);
       });
@@ -334,14 +338,17 @@ void main() {
       await database.close();
     });
 
-    InventoryRepository repository({MobileSession? session}) => InventoryRepository(
-      database: database,
-      api: mockApi(client),
-      session: session ?? fixtureSession(),
-      clock: () => fixtureNow,
-    );
+    InventoryRepository repository({MobileSession? session}) =>
+        InventoryRepository(
+          database: database,
+          api: mockApi(client),
+          session: session ?? fixtureSession(),
+          clock: () => fixtureNow,
+        );
 
-    test('una sesión sin autorización offline no captura aunque conserve un paquete vigente', () async {
+    test(
+        'un perfil anterior sin vigencia territorial usa el paquete operativo vigente',
+        () async {
       final original = fixtureSession();
       final withoutLease = MobileSession(
         userId: original.userId,
@@ -352,28 +359,37 @@ void main() {
       );
       final repo = repository(session: withoutLease);
       await repo.installPackage(package.manifest, period: fixturePeriod());
-      await expectLater(repo.confirmReview(fixturePackageId, '1'),
-          throwsA(isA<DataContractException>()));
-      expect(await (await database.database).query('sync_queue'), isEmpty);
-      expect((await repo.item(fixturePackageId, '1'))!.reviewed, isFalse);
+      await repo.confirmReview(fixturePackageId, '1');
+      expect(await (await database.database).query('sync_queue'), hasLength(1));
+      expect((await repo.item(fixturePackageId, '1'))!.reviewed, isTrue);
     });
 
-    test('no publica un paquete cuya ubicación actual pertenece a otro departamento', () async {
+    test(
+        'no publica un paquete cuya ubicación actual pertenece a otro departamento',
+        () async {
       final page = jsonObject(jsonDecode(utf8.decode(package.pages[1]!)));
-      (page['departamentos'] as List).add({'numero_departamento': '99', 'descripcion': 'Otro departamento'});
+      (page['departamentos'] as List).add(
+          {'numero_departamento': '99', 'descripcion': 'Otro departamento'});
       (page['ubicaciones'] as List).first['numero_departamento'] = '99';
       final bytes = utf8.encode(jsonEncode(page));
-      final counts = {for (final key in packageCollections) key: (page[key] as List).length};
+      final counts = {
+        for (final key in packageCollections) key: (page[key] as List).length
+      };
       final manifest = package.manifest.toJson()
         ..['counts'] = counts
         ..['total_bytes'] = bytes.length
-        ..['pages'] = [{
-          'page': 1, 'bytes': bytes.length, 'sha256': sha256.convert(bytes).toString(),
-          'counts': counts,
-        }];
+        ..['pages'] = [
+          {
+            'page': 1,
+            'bytes': bytes.length,
+            'sha256': sha256.convert(bytes).toString(),
+            'counts': counts,
+          }
+        ];
       package = FixturePackage(PackageManifest.fromJson(manifest), {1: bytes});
       final repo = repository();
-      await expectLater(repo.installPackage(package.manifest, period: fixturePeriod()),
+      await expectLater(
+          repo.installPackage(package.manifest, period: fixturePeriod()),
           throwsA(isA<DataContractException>()));
       expect(await repo.downloadedPackages(), isEmpty);
     });

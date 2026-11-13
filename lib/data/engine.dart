@@ -1,30 +1,42 @@
+/* orquestador principal del sistema de inventario */
+
 import 'api_client.dart';
 import 'database.dart';
 import 'inventory_repository.dart';
 import 'models.dart';
 import 'sync_service.dart';
+import 'package:http/http.dart' as http;
 
-/// Composition root for the UI in phase 3. Keep one instance per signed-in
-/// account/device. Signing in as another account creates a separate engine;
-/// old pending operations remain in SQLite and are never uploaded as that user.
 class InventoryDataEngine {
   final InventoryDatabase database;
+  final MobileSession session;
   late final MobileApiClient api;
   late final InventoryRepository repository;
   late final InventorySyncService sync;
 
-  InventoryDataEngine({required Uri baseUri, required MobileSession session,
+  InventoryDataEngine(
+      {required Uri baseUri,
+      required this.session,
       required Future<String?> Function() tokenProvider,
-      InventoryDatabase? database, bool allowLocalHttp = false})
+      InventoryDatabase? database,
+      bool allowLocalHttp = false,
+      http.Client? client,
+      DateTime Function()? clock})
       : database = database ?? InventoryDatabase.shared {
-    api = MobileApiClient(baseUri: baseUri, tokenProvider: tokenProvider,
-      allowLocalHttp: allowLocalHttp);
-    repository = InventoryRepository(database: this.database, api: api, session: session);
-    sync = InventorySyncService(database: this.database, api: api, session: session);
+    api = MobileApiClient(
+        baseUri: baseUri,
+        tokenProvider: tokenProvider,
+        allowLocalHttp: allowLocalHttp,
+        client: client);
+    repository = InventoryRepository(
+        database: this.database, api: api, session: session, clock: clock);
+    sync = InventorySyncService(
+        database: this.database, api: api, session: session, clock: clock);
   }
 
-  Future<SyncReport> synchronize({bool refreshSnapshots = true}) => sync.synchronize(
-      refreshPackage: refreshSnapshots ? repository.refreshPackage : null);
+  Future<SyncReport> synchronize({bool refreshSnapshots = true}) =>
+      sync.synchronize(
+          refreshPackage: refreshSnapshots ? repository.refreshPackage : null);
 
   void closeNetwork() => api.close();
 }
